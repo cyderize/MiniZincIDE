@@ -26,10 +26,14 @@ linux)
   # binary itself is removed afterwards and taken from vendor/ at package time.
   # TODO: linuxdeploy only publishes a rolling `continuous` tag - the one
   # unpinned input left in the chain. Pin by asset digest if it drifts.
+  case "${LINUX_ARCH:-x86_64}" in
+    x86_64|aarch64) LINUXDEPLOY_ARCH="$LINUX_ARCH" ;;
+    *) echo "unsupported Linux architecture: ${LINUX_ARCH}" >&2; exit 1 ;;
+  esac
   LD_BASE="https://github.com/linuxdeploy/linuxdeploy"
-  curl -sSLo linuxdeploy "$LD_BASE/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+  curl -sSLo linuxdeploy "$LD_BASE/releases/download/continuous/linuxdeploy-${LINUXDEPLOY_ARCH}.AppImage"
   curl -sSLo linuxdeploy-plugin-qt \
-    "$LD_BASE-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+    "$LD_BASE-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-${LINUXDEPLOY_ARCH}.AppImage"
   chmod +x linuxdeploy linuxdeploy-plugin-qt
   export APPIMAGE_EXTRACT_AND_RUN=1   # no FUSE in the container
   PATH="$ROOT:$PATH" ./linuxdeploy --appdir ide \

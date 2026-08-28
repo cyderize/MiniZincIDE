@@ -22,7 +22,11 @@ on:
         type: string
         default: ""
       promote_snap:
-        description: "Path or URL of a built .snap to release to the stable channel."
+        description: "Path or URL of the AMD64 .snap to release to the stable channel."
+        type: string
+        default: ""
+      promote_snap_arm64:
+        description: "Path or URL of the ARM64 .snap to release to the stable channel."
         type: string
         default: ""
 
@@ -36,9 +40,6 @@ permissions:
 env:
   GH_TOKEN: ${{ github.token }}
   QT_VERSION: "6.9.3"
-  # Same image as libminizinc's linux build and minizinc-vendor's solvers, so the
-  # whole bundle shares one glibc floor (2.28).
-  MANYLINUX_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
   # Honoured by scripts/fetch_minizinc.sh; blank means "resolve from the ref".
   MZN_RELEASE: ${{ github.event.inputs.minizinc_release }}
 
@@ -71,7 +72,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux,     triple: x86_64-linux-gnu,     runner: ubuntu-24.04 }
+          # Both manylinux images provide the same glibc 2.28 floor as the
+          # compiler and solver bundles. Build natively so every binary which
+          # gets bundled and executed has one architecture.
+          - { platform: linux,     triple: x86_64-linux-gnu,     runner: ubuntu-24.04,     manylinux_image: quay.io/pypa/manylinux_2_28_x86_64, linux_arch: x86_64,  appimage_arch: x86_64 }
+          - { platform: linux-arm, triple: aarch64-linux-gnu,    runner: ubuntu-24.04-arm, manylinux_image: quay.io/pypa/manylinux_2_28_aarch64, linux_arch: aarch64, appimage_arch: aarch64 }
           - { platform: osx,       triple: aarch64-apple-darwin, runner: macos-14 }
           - { platform: osx-intel, triple: x86_64-apple-darwin,  runner: macos-26-intel }
           - { platform: win64,     triple: x86_64-windows,       runner: windows-2022 }
@@ -81,7 +86,7 @@ jobs:
       - uses: actions/checkout@v7
       # linux gets Qt inside the manylinux container instead.
       - uses: jurplel/install-qt-action@v4
-        if: matrix.platform != 'linux'
+        if: "!startsWith(matrix.platform, 'linux')"
         with:
           version: ${{ env.QT_VERSION }}
           # qtwebsockets is not in qtbase.
@@ -100,14 +105,15 @@ jobs:
 
       # manylinux_2_28: same glibc floor (2.28) as the compiler and solvers.
       - name: Build (linux, manylinux container)
-        if: matrix.platform == 'linux'
+        if: startsWith(matrix.platform, 'linux')
         shell: bash
         run: |
           set -eux
           docker run --rm -v "$PWD:/work" -w /work \
             -e ROOT=/work -e BUILD_REF="$GITHUB_RUN_ID" -e IDE_PLATFORM=linux \
             -e QT_VERSION="${{ env.QT_VERSION }}" -e QT_MODULES=qtwebsockets \
-            "${{ env.MANYLINUX_IMAGE }}" \
+            -e LINUX_ARCH="${{ matrix.linux_arch }}" \
+            "${{ matrix.manylinux_image }}" \
             bash -c '. scripts/linux_build_env.sh && bash scripts/build_ide.sh'
 
       - name: Build (osx)
@@ -126,19 +132,21 @@ jobs:
 
       # ---- package ----------------------------------------------------------
       - name: Package (linux bundle + AppImage)
-        if: matrix.platform == 'linux'
+        if: startsWith(matrix.platform, 'linux')
         shell: bash
         run: |
           set -eux
           docker run --rm -v "$PWD:/work" -w /work \
             -e ROOT=/work -e APPIMAGE_EXTRACT_AND_RUN=1 -e IDE_VERSION -e TRIPLE \
             -e QT_VERSION="${{ env.QT_VERSION }}" -e QT_MODULES=qtwebsockets \
-            "${{ env.MANYLINUX_IMAGE }}" bash -c '
+            -e LINUX_ARCH="${{ matrix.linux_arch }}" \
+            -e APPIMAGE_ARCH="${{ matrix.appimage_arch }}" \
+            "${{ matrix.manylinux_image }}" bash -c '
               set -eux
               dnf -y install file >/dev/null    # linuxdeploy/appimagetool need it
               . scripts/linux_build_env.sh
               curl -sSLo /usr/local/bin/appimagetool \
-                https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+                "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${APPIMAGE_ARCH}.AppImage"
               chmod +x /usr/local/bin/appimagetool
               export APPIMAGE_EXTRACT_AND_RUN=1   # no FUSE in the container
               bash scripts/package_ide.sh linux "$IDE_VERSION" "$TRIPLE"
@@ -148,11 +156,23 @@ jobs:
           IDE_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build{0}', github.run_id) }}
           TRIPLE: ${{ matrix.triple }}
 
+      - name: Inspect Linux package architecture
+        if: startsWith(matrix.platform, 'linux')
+        shell: bash
+        env:
+          IDE_VERSION: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build{0}', github.run_id) }}
+        run: |
+          set -eux
+          package="MiniZincIDE-${IDE_VERSION}-${{ matrix.triple }}"
+          file "$package/bin/MiniZincIDE" "$package/bin/fzn-gecode" \
+            "$package/lib/libhighs.so"* "${package}.AppImage"
+          "$package/bin/minizinc" --solvers
+
       # Built here rather than in its own job: the snap is assembled from the
       # ide/, minizinc/ and vendor/ trees this job already has laid out, none of
       # which are uploaded as artifacts.
       - name: Build snap (linux)
-        if: matrix.platform == 'linux'
+        if: startsWith(matrix.platform, 'linux')
         shell: bash
         run: |
           set -eux
@@ -161,7 +181,7 @@ jobs:
           mkdir -p snap
           cp resources/pkg_config/snapcraft.yaml snap/snapcraft.yaml
       - uses: snapcore/action-build@v1
-        if: matrix.platform == 'linux'
+        if: startsWith(matrix.platform, 'linux')
         id: snapcraft
 
       # Always unsigned, even on develop/tags: sign-macos rebuilds the .dmg from
@@ -441,7 +461,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux,     triple: x86_64-linux-gnu,     runner: ubuntu-24.04 }
+          - { platform: linux,     triple: x86_64-linux-gnu,     runner: ubuntu-24.04,     manylinux_image: quay.io/pypa/manylinux_2_28_x86_64, linux_arch: x86_64 }
+          - { platform: linux-arm, triple: aarch64-linux-gnu,    runner: ubuntu-24.04-arm, manylinux_image: quay.io/pypa/manylinux_2_28_aarch64, linux_arch: aarch64 }
           - { platform: osx,       triple: aarch64-apple-darwin, runner: macos-14 }
           - { platform: osx-intel, triple: x86_64-apple-darwin,  runner: macos-26-intel }
           - { platform: win64,     triple: x86_64-windows,       runner: windows-2022 }
@@ -454,7 +475,7 @@ jobs:
       # linux gets Qt inside the manylinux container instead, to keep its glibc
       # floor (scripts/linux_build_env.sh).
       - uses: jurplel/install-qt-action@v4
-        if: matrix.platform != 'linux'
+        if: "!startsWith(matrix.platform, 'linux')"
         with:
           version: ${{ env.QT_VERSION }}
           # qtwebsockets is not in qtbase.
@@ -471,14 +492,15 @@ jobs:
 
       # Same container as the build; also where Qt is installed.
       - name: Run tests (linux, manylinux container)
-        if: matrix.platform == 'linux'
+        if: startsWith(matrix.platform, 'linux')
         shell: bash
         run: |
           set -eux
           docker run --rm -v "$PWD:/work" -w /work \
             -e ROOT=/work -e QT_QPA_PLATFORM=offscreen \
             -e QT_VERSION="${{ env.QT_VERSION }}" -e QT_MODULES=qtwebsockets \
-            "${{ env.MANYLINUX_IMAGE }}" \
+            -e LINUX_ARCH="${{ matrix.linux_arch }}" \
+            "${{ matrix.manylinux_image }}" \
             bash -c '. scripts/linux_build_env.sh && bash scripts/run_tests.sh'
 
       - name: Run tests (osx)
@@ -595,24 +617,37 @@ jobs:
             done
           fi
 
-      - name: Locate the snap
-        id: snap
+      - name: Locate the AMD64 snap
+        id: snap_amd64
         shell: bash
-        run: echo "path=$(find artifacts -name '*.snap' | head -1)" >> "$GITHUB_OUTPUT"
+        run: echo "path=$(find artifacts/ide-linux -name '*.snap' -print -quit)" >> "$GITHUB_OUTPUT"
 
       # A tagged build goes to `candidate`; `stable` is promoted by hand.
       - uses: snapcore/action-publish@v1
-        if: steps.snap.outputs.path != ''
+        if: steps.snap_amd64.outputs.path != ''
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
         with:
-          snap: ${{ steps.snap.outputs.path }}
+          snap: ${{ steps.snap_amd64.outputs.path }}
+          release: ${{ startsWith(github.ref, 'refs/tags/') && 'candidate' || 'edge' }}
+
+      - name: Locate the ARM64 snap
+        id: snap_arm64
+        shell: bash
+        run: echo "path=$(find artifacts/ide-linux-arm -name '*.snap' -print -quit)" >> "$GITHUB_OUTPUT"
+
+      - uses: snapcore/action-publish@v1
+        if: steps.snap_arm64.outputs.path != ''
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.snap_arm64.outputs.path }}
           release: ${{ startsWith(github.ref, 'refs/tags/') && 'candidate' || 'edge' }}
 
   # Dispatched by hand once a `candidate` build has been checked.
   promote-snap:
     name: promote the snap to stable
-    if: github.event_name == 'workflow_dispatch' && inputs.promote_snap != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.promote_snap != '' && inputs.promote_snap_arm64 != ''
     runs-on: ubuntu-24.04
     # Previously dispatchable from any branch by anyone with write access; the
     # environment's branch/tag policy is what actually restricts that now.
@@ -625,4 +660,10 @@ jobs:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
         with:
           snap: ${{ inputs.promote_snap }}
+          release: stable
+      - uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ inputs.promote_snap_arm64 }}
           release: stable
