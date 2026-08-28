@@ -4,7 +4,8 @@
 # manylinux_2_28 matches libminizinc and minizinc-vendor (glibc 2.28); anything
 # newer raises the whole bundle's floor. Qt 6.10 would too: it needs glibc 2.34.
 #
-# Env: QT_VERSION (required), QT_MODULES (optional, space separated)
+# Env: QT_VERSION (required), QT_MODULES (optional, space separated),
+#      LINUX_ARCH (x86_64 or aarch64; defaults to x86_64)
 set -eu
 
 : "${QT_VERSION:?QT_VERSION must be set}"
@@ -33,12 +34,29 @@ dnf -y --enablerepo=powertools install $QT_DEPS \
 PY=$(ls -d /opt/python/cp311-cp311/bin/python /opt/python/cp312-cp312/bin/python 2>/dev/null | head -1)
 "$PY" -m pip install --quiet aqtinstall
 
-# Qt renamed the Linux desktop arch (6.5 = gcc_64, 6.9+ = linux_gcc_64).
-QT_ARCH=$("$PY" -m aqt list-qt linux desktop --arch "$QT_VERSION" \
-  | tr ' ' '\n' | grep -E '^(linux_)?gcc_64$' | head -1)
+case "${LINUX_ARCH:-x86_64}" in
+x86_64)
+  QT_HOST=linux
+  # Qt renamed the Linux desktop arch (6.5 = gcc_64, 6.9+ = linux_gcc_64).
+  QT_ARCH_PATTERN='^(linux_)?gcc_64$'
+  ;;
+aarch64)
+  # Qt's ARM64 packages have their own host namespace, not just an arch name.
+  QT_HOST=linux_arm64
+  QT_ARCH_PATTERN='^linux_gcc_arm64$'
+  ;;
+*)
+  echo "unsupported Linux architecture: ${LINUX_ARCH}" >&2
+  exit 1
+  ;;
+esac
+
+QT_ARCH=$("$PY" -m aqt list-qt "$QT_HOST" desktop --arch "$QT_VERSION" \
+  | tr ' ' '\n' | grep -E "$QT_ARCH_PATTERN" | head -1)
+[ -n "$QT_ARCH" ] || { echo "no Qt $QT_VERSION package for $LINUX_ARCH" >&2; exit 1; }
 
 # shellcheck disable=SC2086
-"$PY" -m aqt install-qt linux desktop "$QT_VERSION" "$QT_ARCH" \
+"$PY" -m aqt install-qt "$QT_HOST" desktop "$QT_VERSION" "$QT_ARCH" \
   ${QT_MODULES:+-m $QT_MODULES} --outputdir /opt/qt
 
 QT_DIR=$(ls -d /opt/qt/"$QT_VERSION"/*/ | head -1)

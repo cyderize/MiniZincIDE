@@ -73,7 +73,7 @@ appimage)
   cp resources/misc/minizinc.desktop "$PACKAGE/minizinc.desktop"
   cp resources/icon.png "$PACKAGE/minizinc.png"
   OUT="MiniZincIDE-${VERSION}-${TRIPLE}.AppImage"
-  ARCH=x86_64 appimagetool "$PACKAGE" "$OUT"
+  ARCH="${APPIMAGE_ARCH:-x86_64}" appimagetool "$PACKAGE" "$OUT"
   ;;
 
 osx)
